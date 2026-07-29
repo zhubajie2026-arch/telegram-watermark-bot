@@ -1,12 +1,25 @@
 import os
 import cv2
+import asyncio
 import threading
 from http.server import HTTPServer, SimpleHTTPRequestHandler
-from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+
+from telegram import Update, InputMediaPhoto
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    MessageHandler,
+    ContextTypes,
+    filters
+)
 
 TOKEN = os.getenv("BOT_TOKEN")
 
+# 保存相册图片
+album_cache = {}
+
+
+# Render端口
 def run_server():
     server = HTTPServer(("0.0.0.0", 10000), SimpleHTTPRequestHandler)
     server.serve_forever()
@@ -14,33 +27,28 @@ def run_server():
 
 threading.Thread(target=run_server, daemon=True).start()
 
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "🤖 图片去水印机器人已启动\n\n请转发图片给我处理。"
+        "🤖 去水印机器人已启动\n\n"
+        "请转发频道图片给我。\n"
+        "一次最多支持5张图片。"
     )
 
 
-async def remove_watermark(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
-    await update.message.reply_text("🖼 正在处理图片，请稍等...")
-
-    photo = update.message.photo[-1]
-
-    file = await photo.get_file()
-
-    input_file = "input.jpg"
-    output_file = "output.jpg"
-
-    await file.download_to_drive(input_file)
+def remove_watermark(input_file, output_file):
 
     img = cv2.imread(input_file)
 
-    # 简单去除浅色水印
+    if img is None:
+        return False
+
+    # 简单AI修复水印区域
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
 
     mask = cv2.threshold(
         gray,
-        240,
+        220,
         255,
         cv2.THRESH_BINARY
     )[1]
@@ -48,15 +56,80 @@ async def remove_watermark(update: Update, context: ContextTypes.DEFAULT_TYPE):
     result = cv2.inpaint(
         img,
         mask,
-        3,
+        5,
         cv2.INPAINT_TELEA
     )
 
     cv2.imwrite(output_file, result)
 
-    await update.message.reply_photo(
-        photo=open(output_file, "rb"),
-        caption="✅ 处理完成"
+    return True
+
+
+async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    msg = update.message
+
+    group_id = msg.media_group_id
+
+    # 单张图片
+    if not group_id:
+        await process_images([msg], update)
+        return
+
+
+    # 相册缓存
+    if group_id not in album_cache:
+        album_cache[group_id] = []
+
+    album_cache[group_id].append(msg)
+
+
+    # 等待其它图片发送完成
+    await asyncio.sleep(3)
+
+
+    # 只处理一次
+    if len(album_cache[group_id]) > 0:
+
+        photos = album_cache.pop(group_id)
+
+        await process_images(
+            photos[:5],
+            update
+        )
+
+
+async def process_images(messages, update):
+
+    await update.message.reply_text(
+        "🖼 正在批量处理，请稍等..."
+    )
+
+    results = []
+
+    for i, msg in enumerate(messages):
+
+        file = await msg.photo[-1].get_file()
+
+        input_file = f"in_{i}.jpg"
+        output_file = f"out_{i}.jpg"
+
+        await file.download_to_drive(input_file)
+
+        remove_watermark(
+            input_file,
+            output_file
+        )
+
+        results.append(
+            InputMediaPhoto(
+                open(output_file, "rb")
+            )
+        )
+
+
+    await update.message.reply_media_group(
+        results
     )
 
 
@@ -64,16 +137,22 @@ def main():
 
     app = Application.builder().token(TOKEN).build()
 
+
     app.add_handler(
-        CommandHandler("start", start)
+        CommandHandler(
+            "start",
+            start
+        )
     )
+
 
     app.add_handler(
         MessageHandler(
             filters.PHOTO,
-            remove_watermark
+            handle_photo
         )
     )
+
 
     app.run_polling()
 
