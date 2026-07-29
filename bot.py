@@ -1,10 +1,18 @@
 import os
 import cv2
+import threading
+from http.server import HTTPServer, SimpleHTTPRequestHandler
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
 TOKEN = os.getenv("BOT_TOKEN")
 
+def run_server():
+    server = HTTPServer(("0.0.0.0", 10000), SimpleHTTPRequestHandler)
+    server.serve_forever()
+
+
+threading.Thread(target=run_server, daemon=True).start()
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
