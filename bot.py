@@ -93,7 +93,7 @@ async def handle_photo(
             group_id,
             update
         )
-    ）async def wait_album(group_id, update):
+    async def wait_album(group_id, update):
 
     try:
 
