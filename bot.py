@@ -2,6 +2,7 @@ import os
 import asyncio
 import threading
 from http.server import HTTPServer, SimpleHTTPRequestHandler
+import shutil
 
 from telegram import Update, InputMediaPhoto
 from telegram.ext import (
@@ -19,7 +20,7 @@ album_cache = {}
 album_tasks = {}
 
 
-# Render端口保持运行
+# Render端口
 def run_server():
     server = HTTPServer(
         ("0.0.0.0", 10000),
@@ -38,21 +39,20 @@ threading.Thread(
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(
-        "🤖 高速图片处理机器人已启动\n\n"
+        "🤖 图片处理机器人已启动\n\n"
         "支持频道相册5张批量处理"
     )
 
 
 
-# 高速模式：保持原图，不降低质量
+# 快速处理（保持原图）
 async def fast_process(input_file, output_file):
-
-    import shutil
 
     shutil.copy(
         input_file,
         output_file
     )
+
 
 
 async def handle_photo(
@@ -65,7 +65,7 @@ async def handle_photo(
     group_id = msg.media_group_id
 
 
-    # 单张
+    # 单张图片
     if not group_id:
 
         await process_images(
@@ -75,6 +75,8 @@ async def handle_photo(
         return
 
 
+
+    # 相册缓存
     if group_id not in album_cache:
 
         album_cache[group_id] = []
@@ -83,9 +85,12 @@ async def handle_photo(
     album_cache[group_id].append(msg)
 
 
+
+    # 取消旧任务
     if group_id in album_tasks:
 
         album_tasks[group_id].cancel()
+
 
 
     album_tasks[group_id] = asyncio.create_task(
@@ -93,17 +98,25 @@ async def handle_photo(
             group_id,
             update
         )
-    async def wait_album(group_id, update):
+    )
+
+
+
+async def wait_album(
+    group_id,
+    update
+):
 
     try:
 
-        # 等待Telegram相册发送完成
         await asyncio.sleep(2)
+
 
         photos = album_cache.pop(
             group_id,
             []
         )
+
 
         album_tasks.pop(
             group_id,
@@ -120,28 +133,30 @@ async def handle_photo(
 
 
     except asyncio.CancelledError:
+
         pass
 
 
 
 
-async def process_images(messages, update):
+async def process_images(
+    messages,
+    update
+):
 
     await update.message.reply_text(
         "⚡ 正在快速处理..."
     )
 
 
-    media = []
-
-
-    async def handle_one(index, msg):
+    async def one_image(index, msg):
 
         file = await msg.photo[-1].get_file()
 
 
-        input_file = f"fast_in_{index}.jpg"
-        output_file = f"fast_out_{index}.jpg"
+        input_file = f"input_{index}.jpg"
+
+        output_file = f"output_{index}.jpg"
 
 
         await file.download_to_drive(
@@ -163,20 +178,18 @@ async def process_images(messages, update):
         )
 
 
-    # 5张并行处理
-    results = await asyncio.gather(
+
+    media = await asyncio.gather(
         *[
-            handle_one(i, msg)
+            one_image(i, msg)
             for i, msg in enumerate(messages)
         ]
     )
 
 
-    media.extend(results)
-
 
     await update.message.reply_media_group(
-        media
+        media=media
     )
 
 
@@ -189,12 +202,14 @@ def main():
     ).build()
 
 
+
     app.add_handler(
         CommandHandler(
             "start",
             start
         )
     )
+
 
 
     app.add_handler(
@@ -205,10 +220,11 @@ def main():
     )
 
 
+
     app.run_polling()
 
 
 
 if __name__ == "__main__":
+
     main()
-    
