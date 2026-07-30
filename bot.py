@@ -1,8 +1,10 @@
 import os
 import asyncio
 import threading
-from http.server import HTTPServer, SimpleHTTPRequestHandler
 import shutil
+from http.server import HTTPServer, SimpleHTTPRequestHandler
+
+import cv2
 
 from telegram import Update, InputMediaPhoto
 from telegram.ext import (
@@ -20,12 +22,14 @@ album_cache = {}
 album_tasks = {}
 
 
-# Render端口
+# Render 保活端口
 def run_server():
+
     server = HTTPServer(
         ("0.0.0.0", 10000),
         SimpleHTTPRequestHandler
     )
+
     server.serve_forever()
 
 
@@ -39,18 +43,72 @@ threading.Thread(
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(
-        "🤖 图片处理机器人已启动\n\n"
-        "支持频道相册5张批量处理"
+        "🤖 去水印机器人已启动\n\n"
+        "支持一次处理5张图片"
     )
 
 
 
-# 快速处理（保持原图）
+# 轻量去水印
 async def fast_process(input_file, output_file):
 
-    shutil.copy(
-        input_file,
-        output_file
+    img = cv2.imread(input_file)
+
+
+    if img is None:
+
+        shutil.copy(
+            input_file,
+            output_file
+        )
+
+        return
+
+
+
+    gray = cv2.cvtColor(
+        img,
+        cv2.COLOR_BGR2GRAY
+    )
+
+
+    # 检测浅色半透明文字
+    mask = cv2.threshold(
+        gray,
+        220,
+        255,
+        cv2.THRESH_BINARY
+    )[1]
+
+
+    kernel = cv2.getStructuringElement(
+        cv2.MORPH_RECT,
+        (2, 2)
+    )
+
+
+    mask = cv2.morphologyEx(
+        mask,
+        cv2.MORPH_OPEN,
+        kernel
+    )
+
+
+    result = cv2.inpaint(
+        img,
+        mask,
+        1,
+        cv2.INPAINT_TELEA
+    )
+
+
+    cv2.imwrite(
+        output_file,
+        result,
+        [
+            cv2.IMWRITE_JPEG_QUALITY,
+            95
+        ]
     )
 
 
@@ -65,18 +123,18 @@ async def handle_photo(
     group_id = msg.media_group_id
 
 
-    # 单张图片
+    # 单张
     if not group_id:
 
         await process_images(
             [msg],
             update
         )
+
         return
 
 
 
-    # 相册缓存
     if group_id not in album_cache:
 
         album_cache[group_id] = []
@@ -86,7 +144,6 @@ async def handle_photo(
 
 
 
-    # 取消旧任务
     if group_id in album_tasks:
 
         album_tasks[group_id].cancel()
@@ -99,6 +156,7 @@ async def handle_photo(
             update
         )
     )
+
 
 
 
@@ -145,7 +203,7 @@ async def process_images(
 ):
 
     await update.message.reply_text(
-        "⚡ 正在快速处理..."
+        "🖼 正在处理..."
     )
 
 
@@ -154,9 +212,10 @@ async def process_images(
         file = await msg.photo[-1].get_file()
 
 
-        input_file = f"input_{index}.jpg"
+        input_file = f"in_{index}.jpg"
 
-        output_file = f"output_{index}.jpg"
+        output_file = f"out_{index}.jpg"
+
 
 
         await file.download_to_drive(
@@ -185,7 +244,6 @@ async def process_images(
             for i, msg in enumerate(messages)
         ]
     )
-
 
 
     await update.message.reply_media_group(
