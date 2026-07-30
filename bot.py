@@ -1,3 +1,4 @@
+import asyncio
 import os
 import cv2
 import asyncio
@@ -17,7 +18,7 @@ TOKEN = os.getenv("BOT_TOKEN")
 
 # 保存相册图片
 album_cache = {}
-
+album_tasks = {}
 
 # Render端口
 def run_server():
@@ -64,11 +65,9 @@ def remove_watermark(input_file, output_file):
 
     return True
 
-
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     msg = update.message
-
     group_id = msg.media_group_id
 
     # 单张图片
@@ -76,27 +75,40 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await process_images([msg], update)
         return
 
-
-    # 相册缓存
+    # 第一次收到这个相册
     if group_id not in album_cache:
         album_cache[group_id] = []
 
     album_cache[group_id].append(msg)
 
+    # 如果已经有等待任务，取消旧任务
+    if group_id in album_tasks:
+        album_tasks[group_id].cancel()
 
-    # 等待其它图片发送完成
-    await asyncio.sleep(3)
+    # 创建新的等待任务
+    album_tasks[group_id] = asyncio.create_task(
+        wait_album(group_id, update)
+    )
 
 
-    # 只处理一次
-    if len(album_cache[group_id]) > 0:
+async def wait_album(group_id, update):
 
-        photos = album_cache.pop(group_id)
+    try:
+        # 等待相册全部图片发送完成
+        await asyncio.sleep(2)
 
-        await process_images(
-            photos[:5],
-            update
-        )
+        photos = album_cache.pop(group_id, [])
+
+        album_tasks.pop(group_id, None)
+
+        if photos:
+            await process_images(
+                photos[:5],
+                update
+            )
+
+    except asyncio.CancelledError:
+        pass
 
 
 async def process_images(messages, update):
