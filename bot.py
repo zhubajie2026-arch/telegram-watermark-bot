@@ -13,14 +13,13 @@ from telegram.ext import (
     filters
 )
 
-
 TOKEN = os.getenv("BOT_TOKEN")
 
 album_cache = {}
 album_tasks = {}
 
 
-# Render 免费端口
+# Render端口
 def run_server():
     server = HTTPServer(
         ("0.0.0.0", 10000),
@@ -35,22 +34,26 @@ threading.Thread(
 ).start()
 
 
-# 启动
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
     await update.message.reply_text(
         "🤖 去水印机器人已启动\n\n"
-        "请转发频道图片。\n"
-        "支持一次处理5张相册图片。"
+        "支持频道相册5张图片批量处理"
     )
 
 
-# 去水印处理
+
+# 半透明重复水印处理
 def remove_watermark(input_file, output_file):
 
     img = cv2.imread(input_file)
 
     if img is None:
         return False
+
+
+    original = img.copy()
 
 
     # 转灰度
@@ -60,57 +63,59 @@ def remove_watermark(input_file, output_file):
     )
 
 
-    # 自动寻找浅色水印
-    mask = cv2.threshold(
+    # 检测较亮、低透明度文字区域
+    mask1 = cv2.threshold(
         gray,
-        200,
+        180,
         255,
         cv2.THRESH_BINARY
     )[1]
 
 
-    # 扩大水印区域
+    # 去除过大的区域，避免伤害图片
     kernel = cv2.getStructuringElement(
         cv2.MORPH_RECT,
-        (3,3)
+        (2,2)
     )
 
-    mask = cv2.dilate(
-        mask,
-        kernel,
-        iterations=1
+    mask = cv2.morphologyEx(
+        mask1,
+        cv2.MORPH_OPEN,
+        kernel
     )
 
 
+    # 只轻微修复
     result = cv2.inpaint(
-        img,
+        original,
         mask,
-        5,
+        2,
         cv2.INPAINT_TELEA
     )
 
 
+    # 保留高清
     cv2.imwrite(
         output_file,
-        result
+        result,
+        [
+            cv2.IMWRITE_JPEG_QUALITY,
+            95
+        ]
     )
 
     return True
 
 
 
-# 接收图片
-async def handle_photo(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
+
+async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     msg = update.message
 
     group_id = msg.media_group_id
 
 
-    # 单张图片
     if not group_id:
 
         await process_images(
@@ -121,7 +126,6 @@ async def handle_photo(
 
 
 
-    # 相册缓存
     if group_id not in album_cache:
 
         album_cache[group_id] = []
@@ -130,13 +134,13 @@ async def handle_photo(
     album_cache[group_id].append(msg)
 
 
-    # 取消之前等待
+
     if group_id in album_tasks:
 
         album_tasks[group_id].cancel()
 
 
-    # 等待相册完整
+
     album_tasks[group_id] = asyncio.create_task(
         wait_album(
             group_id,
@@ -146,10 +150,8 @@ async def handle_photo(
 
 
 
-async def wait_album(
-    group_id,
-    update
-):
+
+async def wait_album(group_id, update):
 
     try:
 
@@ -183,14 +185,10 @@ async def wait_album(
 
 
 
-# 批量处理
-async def process_images(
-    messages,
-    update
-):
+async def process_images(messages, update):
 
     await update.message.reply_text(
-        "🖼 正在去水印处理中，请稍等..."
+        "🖼 正在处理水印，请稍等..."
     )
 
 
@@ -199,14 +197,11 @@ async def process_images(
 
     for i, msg in enumerate(messages):
 
-
         file = await msg.photo[-1].get_file()
 
 
-        input_file = f"input_{i}.jpg"
-
-        output_file = f"output_{i}.jpg"
-
+        input_file = f"in_{i}.jpg"
+        output_file = f"out_{i}.jpg"
 
 
         await file.download_to_drive(
@@ -233,6 +228,7 @@ async def process_images(
     await update.message.reply_media_group(
         media
     )
+
 
 
 
@@ -264,5 +260,4 @@ def main():
 
 
 if __name__ == "__main__":
-
     main()
