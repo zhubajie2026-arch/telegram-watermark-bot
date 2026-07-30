@@ -4,7 +4,8 @@ import threading
 import shutil
 from http.server import HTTPServer, SimpleHTTPRequestHandler
 
-import replicate
+import cv2
+import numpy as np
 
 from telegram import Update, InputMediaPhoto
 from telegram.ext import (
@@ -17,20 +18,22 @@ from telegram.ext import (
 
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
-REPLICATE_TOKEN = os.getenv("REPLICATE_API_TOKEN", "").strip()
 
 
 album_cache = {}
 album_tasks = {}
 
 
-# Render 保活端口
+# Render 保活
 def run_server():
+
     server = HTTPServer(
         ("0.0.0.0", 10000),
         SimpleHTTPRequestHandler
     )
+
     server.serve_forever()
+
 
 
 threading.Thread(
@@ -40,56 +43,107 @@ threading.Thread(
 
 
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def start(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
 
     await update.message.reply_text(
-        "🤖 AI去水印机器人已启动\n\n"
-        "发送图片即可自动去除水印\n"
+        "🤖 去水印机器人已启动\n\n"
+        "发送图片即可自动去水印\n"
         "支持相册批量处理"
     )
 
 
 
-# Replicate AI 去水印
-async def ai_process(input_file, output_file):
+# 自动检测+修复水印
+async def remove_watermark(
+    input_file,
+    output_file
+):
 
     try:
 
-        output = await asyncio.to_thread(
-            replicate.run,
-            "cjwbw/rembg",
-            {
-                "image": open(
-                    input_file,
-                    "rb"
-                )
-            }
+        img = cv2.imread(
+            input_file
         )
 
 
-        if output:
-
-            with open(
-                output_file,
-                "wb"
-            ) as f:
-
-                f.write(
-                    output.read()
-                )
-
-        else:
+        if img is None:
 
             shutil.copy(
                 input_file,
                 output_file
             )
 
+            return
+
+
+
+        gray = cv2.cvtColor(
+            img,
+            cv2.COLOR_BGR2GRAY
+        )
+
+
+        # 检测亮色水印
+        mask = cv2.threshold(
+            gray,
+            210,
+            255,
+            cv2.THRESH_BINARY
+        )[1]
+
+
+        # 边缘文字检测
+        edge = cv2.Canny(
+            gray,
+            80,
+            160
+        )
+
+
+        mask = cv2.bitwise_or(
+            mask,
+            edge
+        )
+
+
+        kernel = np.ones(
+            (3,3),
+            np.uint8
+        )
+
+
+        mask = cv2.morphologyEx(
+            mask,
+            cv2.MORPH_CLOSE,
+            kernel
+        )
+
+
+        result = cv2.inpaint(
+            img,
+            mask,
+            3,
+            cv2.INPAINT_TELEA
+        )
+
+
+        cv2.imwrite(
+            output_file,
+            result,
+            [
+                cv2.IMWRITE_JPEG_QUALITY,
+                98
+            ]
+        )
+
 
     except Exception as e:
 
         print(
-            "AI处理错误:",
+            "处理错误:",
             e
         )
 
@@ -127,12 +181,15 @@ async def handle_photo(
         album_cache[group_id] = []
 
 
-    album_cache[group_id].append(msg)
+    album_cache[group_id].append(
+        msg
+    )
 
 
     if group_id in album_tasks:
 
         album_tasks[group_id].cancel()
+
 
 
     album_tasks[group_id] = asyncio.create_task(
@@ -189,19 +246,25 @@ async def process_images(
 ):
 
     await update.message.reply_text(
-        "🤖 AI正在去水印，请稍候..."
+        "🖼 正在去水印，请稍候..."
     )
 
 
-    async def one_image(index, msg):
+    async def one_image(
+        index,
+        msg
+    ):
 
         file = await msg.photo[-1].get_file()
 
 
-        input_file = f"input_{index}.jpg"
+        input_file = (
+            f"input_{index}.jpg"
+        )
 
-        output_file = f"output_{index}.png"
-
+        output_file = (
+            f"output_{index}.jpg"
+        )
 
 
         await file.download_to_drive(
@@ -209,7 +272,7 @@ async def process_images(
         )
 
 
-        await ai_process(
+        await remove_watermark(
             input_file,
             output_file
         )
@@ -239,22 +302,12 @@ async def process_images(
 
 
 
-
 def main():
 
     if not BOT_TOKEN:
 
         print(
             "缺少 BOT_TOKEN"
-        )
-
-        return
-
-
-    if not REPLICATE_TOKEN:
-
-        print(
-            "缺少 REPLICATE_API_TOKEN"
         )
 
         return
@@ -275,14 +328,12 @@ def main():
     )
 
 
-
     app.add_handler(
         MessageHandler(
             filters.PHOTO,
             handle_photo
         )
     )
-
 
 
     app.run_polling()
