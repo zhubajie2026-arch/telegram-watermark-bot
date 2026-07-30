@@ -4,7 +4,7 @@ import threading
 import shutil
 from http.server import HTTPServer, SimpleHTTPRequestHandler
 
-import cv2
+import replicate
 
 from telegram import Update, InputMediaPhoto
 from telegram.ext import (
@@ -16,13 +16,15 @@ from telegram.ext import (
 )
 
 
-TOKEN = os.getenv("BOT_TOKEN")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
+REPLICATE_TOKEN = os.getenv("REPLICATE_API_TOKEN", "").strip()
+
 
 album_cache = {}
 album_tasks = {}
 
 
-# Render端口
+# Render 保活端口
 def run_server():
     server = HTTPServer(
         ("0.0.0.0", 10000),
@@ -41,84 +43,61 @@ threading.Thread(
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(
-        "🤖 去水印机器人已启动\n\n"
-        "支持频道相册5张批量处理"
+        "🤖 AI去水印机器人已启动\n\n"
+        "发送图片即可自动去除水印\n"
+        "支持相册批量处理"
     )
 
 
 
-# 免费增强去水印
-async def fast_process(input_file, output_file):
+# Replicate AI 去水印
+async def ai_process(input_file, output_file):
 
-    img = cv2.imread(input_file)
+    try:
 
-    if img is None:
+        output = await asyncio.to_thread(
+            replicate.run,
+            "cjwbw/rembg",
+            {
+                "image": open(
+                    input_file,
+                    "rb"
+                )
+            }
+        )
+
+
+        if output:
+
+            with open(
+                output_file,
+                "wb"
+            ) as f:
+
+                f.write(
+                    output.read()
+                )
+
+        else:
+
+            shutil.copy(
+                input_file,
+                output_file
+            )
+
+
+    except Exception as e:
+
+        print(
+            "AI处理错误:",
+            e
+        )
+
         shutil.copy(
             input_file,
             output_file
         )
-        return
 
-
-    gray = cv2.cvtColor(
-        img,
-        cv2.COLOR_BGR2GRAY
-    )
-
-
-    # 浅色文字检测
-    bright = cv2.threshold(
-        gray,
-        210,
-        255,
-        cv2.THRESH_BINARY
-    )[1]
-
-
-    # 文字边缘检测
-    edge = cv2.Canny(
-        gray,
-        80,
-        160
-    )
-
-
-    mask = cv2.bitwise_or(
-        bright,
-        edge
-    )
-
-
-    kernel = cv2.getStructuringElement(
-        cv2.MORPH_RECT,
-        (2, 2)
-    )
-
-
-    mask = cv2.morphologyEx(
-        mask,
-        cv2.MORPH_OPEN,
-        kernel
-    )
-
-
-    # 限制修复强度，避免变糊
-    result = cv2.inpaint(
-        img,
-        mask,
-        1,
-        cv2.INPAINT_TELEA
-    )
-
-
-    cv2.imwrite(
-        output_file,
-        result,
-        [
-            cv2.IMWRITE_JPEG_QUALITY,
-            95
-        ]
-    )
 
 
 
@@ -138,11 +117,13 @@ async def handle_photo(
             [msg],
             update
         )
+
         return
 
 
 
     if group_id not in album_cache:
+
         album_cache[group_id] = []
 
 
@@ -150,6 +131,7 @@ async def handle_photo(
 
 
     if group_id in album_tasks:
+
         album_tasks[group_id].cancel()
 
 
@@ -159,6 +141,7 @@ async def handle_photo(
             update
         )
     )
+
 
 
 
@@ -193,7 +176,10 @@ async def wait_album(
 
 
     except asyncio.CancelledError:
+
         pass
+
+
 
 
 
@@ -203,7 +189,7 @@ async def process_images(
 ):
 
     await update.message.reply_text(
-        "🖼 正在处理..."
+        "🤖 AI正在去水印，请稍候..."
     )
 
 
@@ -213,7 +199,9 @@ async def process_images(
 
 
         input_file = f"input_{index}.jpg"
-        output_file = f"output_{index}.jpg"
+
+        output_file = f"output_{index}.png"
+
 
 
         await file.download_to_drive(
@@ -221,7 +209,7 @@ async def process_images(
         )
 
 
-        await fast_process(
+        await ai_process(
             input_file,
             output_file
         )
@@ -233,6 +221,7 @@ async def process_images(
                 "rb"
             )
         )
+
 
 
     media = await asyncio.gather(
@@ -249,11 +238,33 @@ async def process_images(
 
 
 
+
+
 def main():
 
+    if not BOT_TOKEN:
+
+        print(
+            "缺少 BOT_TOKEN"
+        )
+
+        return
+
+
+    if not REPLICATE_TOKEN:
+
+        print(
+            "缺少 REPLICATE_API_TOKEN"
+        )
+
+        return
+
+
+
     app = Application.builder().token(
-        TOKEN
+        BOT_TOKEN
     ).build()
+
 
 
     app.add_handler(
@@ -264,6 +275,7 @@ def main():
     )
 
 
+
     app.add_handler(
         MessageHandler(
             filters.PHOTO,
@@ -272,9 +284,12 @@ def main():
     )
 
 
+
     app.run_polling()
 
 
 
+
 if __name__ == "__main__":
+
     main()
