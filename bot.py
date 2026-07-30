@@ -22,14 +22,12 @@ album_cache = {}
 album_tasks = {}
 
 
-# Render 保活端口
+# Render端口
 def run_server():
-
     server = HTTPServer(
         ("0.0.0.0", 10000),
         SimpleHTTPRequestHandler
     )
-
     server.serve_forever()
 
 
@@ -44,26 +42,22 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(
         "🤖 去水印机器人已启动\n\n"
-        "支持一次处理5张图片"
+        "支持频道相册5张批量处理"
     )
 
 
 
-# 轻量去水印
+# 免费增强去水印
 async def fast_process(input_file, output_file):
 
     img = cv2.imread(input_file)
 
-
     if img is None:
-
         shutil.copy(
             input_file,
             output_file
         )
-
         return
-
 
 
     gray = cv2.cvtColor(
@@ -72,13 +66,27 @@ async def fast_process(input_file, output_file):
     )
 
 
-    # 检测浅色半透明文字
-    mask = cv2.threshold(
+    # 浅色文字检测
+    bright = cv2.threshold(
         gray,
-        220,
+        210,
         255,
         cv2.THRESH_BINARY
     )[1]
+
+
+    # 文字边缘检测
+    edge = cv2.Canny(
+        gray,
+        80,
+        160
+    )
+
+
+    mask = cv2.bitwise_or(
+        bright,
+        edge
+    )
 
 
     kernel = cv2.getStructuringElement(
@@ -94,6 +102,7 @@ async def fast_process(input_file, output_file):
     )
 
 
+    # 限制修复强度，避免变糊
     result = cv2.inpaint(
         img,
         mask,
@@ -123,31 +132,25 @@ async def handle_photo(
     group_id = msg.media_group_id
 
 
-    # 单张
     if not group_id:
 
         await process_images(
             [msg],
             update
         )
-
         return
 
 
 
     if group_id not in album_cache:
-
         album_cache[group_id] = []
 
 
     album_cache[group_id].append(msg)
 
 
-
     if group_id in album_tasks:
-
         album_tasks[group_id].cancel()
-
 
 
     album_tasks[group_id] = asyncio.create_task(
@@ -156,7 +159,6 @@ async def handle_photo(
             update
         )
     )
-
 
 
 
@@ -191,9 +193,7 @@ async def wait_album(
 
 
     except asyncio.CancelledError:
-
         pass
-
 
 
 
@@ -212,10 +212,8 @@ async def process_images(
         file = await msg.photo[-1].get_file()
 
 
-        input_file = f"in_{index}.jpg"
-
-        output_file = f"out_{index}.jpg"
-
+        input_file = f"input_{index}.jpg"
+        output_file = f"output_{index}.jpg"
 
 
         await file.download_to_drive(
@@ -237,7 +235,6 @@ async def process_images(
         )
 
 
-
     media = await asyncio.gather(
         *[
             one_image(i, msg)
@@ -252,13 +249,11 @@ async def process_images(
 
 
 
-
 def main():
 
     app = Application.builder().token(
         TOKEN
     ).build()
-
 
 
     app.add_handler(
@@ -269,7 +264,6 @@ def main():
     )
 
 
-
     app.add_handler(
         MessageHandler(
             filters.PHOTO,
@@ -278,11 +272,9 @@ def main():
     )
 
 
-
     app.run_polling()
 
 
 
 if __name__ == "__main__":
-
     main()
