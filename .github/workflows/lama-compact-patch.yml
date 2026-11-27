@@ -1,0 +1,72 @@
+name: LaMa compact patch CPU quota test
+on:
+  pull_request:
+    branches: [lama-benchmark-base-20261127]
+    paths: ['.github/workflows/lama-compact-patch.yml']
+permissions:
+  contents: read
+jobs:
+  dynamic:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    strategy:
+      fail-fast: false
+      matrix:
+        side: [96, 128]
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install onnxruntime==1.23.2 numpy pillow
+      - run: curl -fL --retry 2 --max-time 180 https://huggingface.co/g-ronimo/lama/resolve/386a67c/lama_int8.onnx -o dynamic.onnx
+      - name: Compare local patch accuracy and process memory
+        env:
+          SIDE: ${{ matrix.side }}
+        run: |
+          cat > compact.py <<'PY'
+          import os,time,json,resource
+          import numpy as np,onnxruntime as ort
+          from PIL import Image,ImageDraw,ImageFont,ImageFilter
+          side=int(os.environ['SIDE'])
+          opt=ort.SessionOptions()
+          opt.intra_op_num_threads=1
+          opt.inter_op_num_threads=1
+          opt.enable_cpu_mem_arena=False
+          opt.enable_mem_pattern=False
+          opt.add_session_config_entry('session.disable_prepacking','1')
+          opt.graph_optimization_level=ort.GraphOptimizationLevel.ORT_ENABLE_BASIC
+          session=ort.InferenceSession('dynamic.onnx',sess_options=opt,providers=['CPUExecutionProvider'])
+          print('LAMA_INPUT_SHAPE',session.get_inputs()[0].shape,flush=True)
+          rng=np.random.default_rng(42)
+          yy,xx=np.indices((512,512))
+          grain=8*np.sin(xx/4+np.sin(yy/65))+3*rng.normal(size=(512,512))
+          img=Image.fromarray(np.stack([160+grain,117+grain,75+grain],axis=-1).clip(0,255).astype('uint8'))
+          ImageDraw.Draw(img).line((0,243,511,270),fill='#574338',width=6)
+          source=np.array(img)
+          ink=Image.new('L',img.size,0)
+          ImageDraw.Draw(ink).text((215,240),'TEST',font=ImageFont.truetype('DejaVuSans.ttf',24),fill=255)
+          roi=np.asarray(ink.filter(ImageFilter.MaxFilter(7)))>0
+          marked=source.copy()
+          marked[np.asarray(ink)>0]=255
+          offset=(512-256)//2
+          sl=slice(offset,offset+256)
+          mask=roi[sl,sl]
+          assert mask.sum()==roi.sum()
+          crop=marked[sl,sl].copy()
+          small=np.asarray(Image.fromarray(crop).resize((side,side),Image.Resampling.BOX))
+          sm=np.asarray(Image.fromarray(mask.astype(np.uint8)*255).resize((side,side),Image.Resampling.BOX))>0
+          a=small.astype(np.float32)/255
+          a[sm]=0
+          tensor=np.concatenate((a,sm[:,:,None].astype(np.float32)),axis=2).transpose(2,0,1)[None].copy()
+          times=[]
+          for i in range(3):
+              start=time.perf_counter()
+              p=session.run(None,{session.get_inputs()[0].name:tensor})[0]
+              times.append(round(time.perf_counter()-start,3))
+          p=(np.clip(p[0].transpose(1,2,0),0,1)*255).astype('uint8')
+          p=np.asarray(Image.fromarray(p).resize((256,256),Image.Resampling.BICUBIC))
+          out=marked.copy()
+          out[sl,sl]=np.where(mask[:,:,None],p,crop)
+          print('LAMA_VARIABLE_PATCH_RESULT',json.dumps(dict(side=side,seconds=times,masked_mae=float(np.abs(out.astype(float)-source)[roi].mean()),unchanged_outside=bool(np.array_equal(out[~roi],source[~roi])),peak_rss_mib=round(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss/1024,1))),flush=True)
+          PY
+          sudo systemd-run --wait --pipe --collect --uid="$(id -u)" --gid="$(id -g)" -p "WorkingDirectory=$PWD" -p CPUQuota=15% -p MemoryMax=512M -p MemorySwapMax=0 --setenv=SIDE="$SIDE" "$(command -v python)" -u compact.py

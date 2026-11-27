@@ -1,0 +1,52 @@
+name: LaMa low-memory worker test
+on:
+  pull_request:
+    branches: [lama-benchmark-base-20261127]
+    paths: ['.github/workflows/lama-memory.yml']
+permissions:
+  contents: read
+jobs:
+  memory:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install onnxruntime==1.23.2 numpy
+      - run: curl -fL --retry 2 --max-time 180 https://huggingface.co/g-ronimo/lama/resolve/386a67c/lama_512_int8.onnx -o lama-int8.onnx
+      - name: Compare independent worker processes
+        run: |
+          cat > probe.py <<'PY'
+          import os,sys,time,json,resource
+          import numpy as np,onnxruntime as ort
+          mode=sys.argv[1]
+          opt=ort.SessionOptions()
+          opt.intra_op_num_threads=1
+          opt.inter_op_num_threads=1
+          opt.enable_cpu_mem_arena=False
+          opt.enable_mem_pattern=False
+          if mode in ('no-prepack','basic','disabled'):
+              opt.add_session_config_entry('session.disable_prepacking','1')
+          if mode=='basic':
+              opt.graph_optimization_level=ort.GraphOptimizationLevel.ORT_ENABLE_BASIC
+          if mode=='disabled':
+              opt.graph_optimization_level=ort.GraphOptimizationLevel.ORT_DISABLE_ALL
+          t=time.perf_counter()
+          model=ort.InferenceSession('lama-int8.onnx',sess_options=opt,providers=['CPUExecutionProvider'])
+          load=time.perf_counter()-t
+          a=np.zeros((1,4,512,512),dtype=np.float32)
+          a[:,:3]=.6
+          a[:,3,230:255,200:300]=1
+          a[:,:3,230:255,200:300]=0
+          times=[]
+          for i in range(2):
+              t=time.perf_counter()
+              p=model.run(None,{model.get_inputs()[0].name:a})[0]
+              times.append(round(time.perf_counter()-t,3))
+              assert np.isfinite(p).all()
+          print('LAMA_MEMORY_RESULT',json.dumps(dict(mode=mode,seconds=times,load=round(load,3),rss_mib=round(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss/1024,1),mean_output=float(p[:,:,230:255,200:300].mean()))),flush=True)
+          PY
+          for mode in default no-prepack basic disabled; do
+            python probe.py "$mode" || echo "LAMA_MEMORY_FAILED $mode"
+          done
