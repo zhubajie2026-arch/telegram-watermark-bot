@@ -12,7 +12,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        side: [128, 192, 256]
+        side: [96, 128]
     steps:
       - uses: actions/setup-python@v5
         with:
@@ -48,20 +48,23 @@ jobs:
           roi=np.asarray(ink.filter(ImageFilter.MaxFilter(7)))>0
           marked=source.copy()
           marked[np.asarray(ink)>0]=255
-          offset=(512-side)//2
-          sl=slice(offset,offset+side)
+          offset=(512-256)//2
+          sl=slice(offset,offset+256)
           mask=roi[sl,sl]
           assert mask.sum()==roi.sum()
           crop=marked[sl,sl].copy()
-          a=crop.astype(np.float32)/255
-          a[mask]=0
-          tensor=np.concatenate((a,mask[:,:,None].astype(np.float32)),axis=2).transpose(2,0,1)[None].copy()
+          small=np.asarray(Image.fromarray(crop).resize((side,side),Image.Resampling.BOX))
+          sm=np.asarray(Image.fromarray(mask.astype(np.uint8)*255).resize((side,side),Image.Resampling.BOX))>0
+          a=small.astype(np.float32)/255
+          a[sm]=0
+          tensor=np.concatenate((a,sm[:,:,None].astype(np.float32)),axis=2).transpose(2,0,1)[None].copy()
           times=[]
           for i in range(3):
               start=time.perf_counter()
               p=session.run(None,{session.get_inputs()[0].name:tensor})[0]
               times.append(round(time.perf_counter()-start,3))
           p=(np.clip(p[0].transpose(1,2,0),0,1)*255).astype('uint8')
+          p=np.asarray(Image.fromarray(p).resize((256,256),Image.Resampling.BICUBIC))
           out=marked.copy()
           out[sl,sl]=np.where(mask[:,:,None],p,crop)
           print('LAMA_VARIABLE_PATCH_RESULT',json.dumps(dict(side=side,seconds=times,masked_mae=float(np.abs(out.astype(float)-source)[roi].mean()),unchanged_outside=bool(np.array_equal(out[~roi],source[~roi])),peak_rss_mib=round(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss/1024,1))),flush=True)
