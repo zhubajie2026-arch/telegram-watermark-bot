@@ -136,3 +136,54 @@ jobs:
           name: lama-synthetic-comparison
           path: benchmark-output/
           retention-days: 3
+  lightweight:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install onnxruntime==1.23.2 numpy pillow
+      - name: Download quantized public model
+        run: curl -fL --retry 2 --max-time 180 https://huggingface.co/g-ronimo/lama/resolve/386a67c/lama_512_int8.onnx -o lama-int8.onnx
+      - name: Test memory and CPU performance
+        run: |
+          python - <<'PY'
+          import os, time, resource, json
+          import numpy as np
+          import onnxruntime as ort
+          from PIL import Image, ImageDraw, ImageFont, ImageFilter
+          for threads in (1,2,4):
+              options=ort.SessionOptions()
+              options.intra_op_num_threads=threads
+              options.inter_op_num_threads=1
+              options.enable_cpu_mem_arena=False
+              options.enable_mem_pattern=False
+              start=time.perf_counter()
+              session=ort.InferenceSession('lama-int8.onnx',sess_options=options,providers=['CPUExecutionProvider'])
+              load=time.perf_counter()-start
+              size=512
+              yy,xx=np.indices((size,size))
+              grain=8*np.sin(xx/4+np.sin(yy/65))
+              source=np.stack([160+grain,117+grain,75+grain],axis=-1).clip(0,255).astype('uint8')
+              img=Image.fromarray(source)
+              ImageDraw.Draw(img).line((0,230,511,265),fill='#574338',width=6)
+              source=np.array(img)
+              mask=Image.new('L',(size,size),0)
+              ImageDraw.Draw(mask).text((120,230),'TEST 2026',font=ImageFont.truetype('DejaVuSans.ttf',32),fill=255)
+              roi=np.asarray(mask.filter(ImageFilter.MaxFilter(7)))>0
+              marked=source.copy()
+              marked[np.asarray(mask)>0]=255
+              masked=marked.astype('float32')/255
+              masked[roi]=0
+              tensor=np.concatenate((masked,roi[:,:,None].astype('float32')),axis=2).transpose(2,0,1)[None].copy()
+              times=[]
+              for i in range(3):
+                  t=time.perf_counter()
+                  out=session.run(None,{session.get_inputs()[0].name:tensor})[0]
+                  times.append(round(time.perf_counter()-t,3))
+              repaired=(np.clip(out[0].transpose(1,2,0),0,1)*255).astype('uint8')
+              result=np.where(roi[:,:,None],repaired,marked)
+              print('LAMA_ONNX_BENCHMARK',json.dumps(dict(threads=threads,load_seconds=round(load,2),seconds=times,peak_rss_mib=round(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss/1024,1),masked_mae=float(np.abs(result.astype(float)-source)[roi].mean()),unchanged_outside=bool(np.array_equal(result[~roi],source[~roi])))),flush=True)
+              del session
+          PY
