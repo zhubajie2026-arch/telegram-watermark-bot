@@ -52,7 +52,7 @@ jobs:
               im=torch.from_numpy(marked.copy()).permute(2,0,1).unsqueeze(0).float()/255
               ma=torch.from_numpy(region.copy()).unsqueeze(0).unsqueeze(0).float()
               times=[]
-              for n in range(3):
+              for n in range(1):
                   start=time.perf_counter()
                   with torch.inference_mode(): out=model(im,ma)
                   times.append(round(time.perf_counter()-start,3))
@@ -109,6 +109,27 @@ jobs:
           os.makedirs('benchmark-output',exist_ok=True)
           for name,arr in [('original',source),('test-input',marked),('full',full),('patch',patch)]:
               Image.fromarray(arr).save('benchmark-output/'+name+'.png')
+          # Nine separate synthetic images; measure sustained inference with known edit masks.
+          batch_times=[]
+          batch_errors=[]
+          batch_preserved=[]
+          for i in range(9):
+              shift=(i*17,i*23)
+              target=np.roll(source,shift,axis=(0,1))
+              inp=np.roll(marked,shift,axis=(0,1))
+              roi=np.roll(region,shift,axis=(0,1))
+              result=inp.copy()
+              start=time.perf_counter()
+              for x1,y1,x2,y2 in boxes:
+                  w=320
+                  x=max(0,min(size-w,(x1+x2-w)//2+shift[1]))
+                  y=max(0,min(size-w,(y1+y2-w)//2+shift[0]))
+                  result[y:y+w,x:x+w]=repair(result[y:y+w,x:x+w],roi[y:y+w,x:x+w])
+              elapsed=time.perf_counter()-start
+              batch_times.append(round(elapsed,3))
+              batch_errors.append(round(float(np.abs(result.astype(float)-target)[roi].mean()),3))
+              batch_preserved.append(bool(np.array_equal(result[~roi],target[~roi])))
+          print('LAMA_BATCH_BENCHMARK',json.dumps(dict(count=9,seconds=batch_times,total_seconds=round(sum(batch_times),3),mean_seconds=round(statistics.mean(batch_times),3),max_seconds=max(batch_times),masked_mae=batch_errors,unchanged_outside=all(batch_preserved))),flush=True)
           PY
       - uses: actions/upload-artifact@v4
         with:
