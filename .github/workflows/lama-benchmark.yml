@@ -60,4 +60,58 @@ jobs:
               restored=np.where(region[:,:,None],restored,marked)
               mae=float(np.abs(restored.astype(float)-source)[region].mean())
               print('LAMA_BENCHMARK',json.dumps(dict(size=size,seconds=times,masked_mae=mae,unchanged_outside=bool(np.array_equal(restored[~region],source[~region])))),flush=True)
+          # Compare full-resolution inference with native-resolution localized patches.
+          import statistics
+          size=1024
+          rng=np.random.default_rng(42)
+          yy,xx=np.indices((size,size))
+          grain=(8*np.sin(xx/4+np.sin(yy/65))+3*rng.normal(size=(size,size)))
+          base=np.stack([160+grain,117+grain,75+grain],axis=-1).clip(0,255).astype('uint8')
+          source_img=Image.fromarray(base)
+          d=ImageDraw.Draw(source_img)
+          for j in range(6):
+              y=90+j*155
+              d.line((0,y,size,y+30),fill='#574338',width=6)
+              d.rounded_rectangle((330,y+45,670,y+58),radius=5,fill='#312d2a')
+          source=np.array(source_img)
+          mask=Image.new('L',(size,size),0)
+          d=ImageDraw.Draw(mask)
+          f=ImageFont.truetype('DejaVuSans.ttf',32)
+          boxes=[]
+          for x,y in ((90,120),(430,460),(725,800)):
+              d.text((x,y),'TEST 2026',font=f,fill=255)
+              boxes.append(d.textbbox((x,y),'TEST 2026',font=f))
+          marked=source.copy()
+          marked[np.asarray(mask)>0]=255
+          region=np.asarray(mask.filter(ImageFilter.MaxFilter(7)))>0
+          def repair(arr,mask):
+              a=torch.from_numpy(arr.copy()).permute(2,0,1).unsqueeze(0).float()/255
+              m=torch.from_numpy(mask.copy()).unsqueeze(0).unsqueeze(0).float()
+              with torch.inference_mode(): p=model(a,m)
+              p=(p[0].permute(1,2,0).clamp(0,1).numpy()*255).astype('uint8')
+              return np.where(mask[:,:,None],p,arr)
+          start=time.perf_counter()
+          full=repair(marked,region)
+          full_s=time.perf_counter()-start
+          def patch_repair():
+              result=marked.copy()
+              for x1,y1,x2,y2 in boxes:
+                  w=320
+                  x=max(0,min(size-w,(x1+x2-w)//2))
+                  y=max(0,min(size-w,(y1+y2-w)//2))
+                  result[y:y+w,x:x+w]=repair(result[y:y+w,x:x+w],region[y:y+w,x:x+w])
+              return result
+          start=time.perf_counter()
+          patch=patch_repair()
+          patch_s=time.perf_counter()-start
+          for label,result,elapsed in [('full',full,full_s),('patch',patch,patch_s)]:
+              print('LAMA_PATCH_BENCHMARK',json.dumps(dict(mode=label,seconds=round(elapsed,3),masked_mae=float(np.abs(result.astype(float)-source)[region].mean()),unchanged_outside=bool(np.array_equal(result[~region],source[~region])))),flush=True)
+          os.makedirs('benchmark-output',exist_ok=True)
+          for name,arr in [('original',source),('test-input',marked),('full',full),('patch',patch)]:
+              Image.fromarray(arr).save('benchmark-output/'+name+'.png')
           PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lama-synthetic-comparison
+          path: benchmark-output/
+          retention-days: 3
