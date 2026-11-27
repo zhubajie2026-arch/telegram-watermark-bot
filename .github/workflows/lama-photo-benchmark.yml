@@ -1,0 +1,101 @@
+name: LaMa photo and detection validation
+on:
+  pull_request:
+    branches: [lama-benchmark-base-20261127]
+    paths: ['.github/workflows/lama-photo-benchmark.yml']
+permissions:
+  contents: read
+jobs:
+  photos:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install onnxruntime==1.23.2 numpy pillow scikit-image rapidocr-onnxruntime==1.4.4
+      - run: curl -fL --retry 2 --max-time 180 https://huggingface.co/g-ronimo/lama/resolve/386a67c/lama_512_int8.onnx -o lama-int8.onnx
+      - name: Validate on sample photos with our own synthetic marks
+        run: |
+          python - <<'PY'
+          import json,time,resource,os,re
+          import cv2,numpy as np,onnxruntime as ort
+          from skimage import data
+          from PIL import Image,ImageDraw,ImageFont,ImageFilter
+          from rapidocr_onnxruntime import RapidOCR
+          cv2.setNumThreads(1)
+          opt=ort.SessionOptions()
+          opt.intra_op_num_threads=2
+          opt.inter_op_num_threads=1
+          opt.enable_cpu_mem_arena=False
+          opt.enable_mem_pattern=False
+          model=ort.InferenceSession('lama-int8.onnx',sess_options=opt,providers=['CPUExecutionProvider'])
+          ocr=RapidOCR(intra_op_num_threads=1,inter_op_num_threads=1,det_limit_type='max',rec_batch_num=1)
+          font=ImageFont.truetype('DejaVuSans.ttf',38)
+          def repair(arr,mask):
+              if not mask.any(): return arr.copy()
+              ys,xs=np.nonzero(mask)
+              h,w=mask.shape
+              side=512
+              assert w>=side and h>=side
+              if int(xs.max()-xs.min())>=side or int(ys.max()-ys.min())>=side:
+                  raise ValueError('test mask exceeds patch capacity')
+              x=max(0,min(w-side,(int(xs.min())+int(xs.max())-side)//2))
+              y=max(0,min(h-side,(int(ys.min())+int(ys.max())-side)//2))
+              local=mask[y:y+side,x:x+side]
+              assert local.sum()==mask.sum()
+              crop=arr[y:y+side,x:x+side].copy()
+              rgb=crop.astype(np.float32)/255
+              rgb[local]=0
+              tensor=np.concatenate((rgb,local[:,:,None].astype(np.float32)),axis=2).transpose(2,0,1)[None].copy()
+              p=model.run(None,{model.get_inputs()[0].name:tensor})[0]
+              p=(np.clip(p[0].transpose(1,2,0),0,1)*255).astype(np.uint8)
+              result=arr.copy()
+              result[y:y+side,x:x+side]=np.where(local[:,:,None],p,crop)
+              return result
+          os.makedirs('photo-output',exist_ok=True)
+          rows=[]
+          for i,name in enumerate(['coffee','camera','coins','rocket','brick','grass','gravel','cat','horse']):
+              img=Image.fromarray(getattr(data,name)()).convert('RGB')
+              img=img.resize((1024,1024),Image.Resampling.LANCZOS)
+              src=np.array(img)
+              mark=Image.new('L',(240,100),0)
+              ImageDraw.Draw(mark).text((8,12),'TEST 2026',font=font,fill=255)
+              mark=mark.rotate((0,15,-20)[i%3],expand=True,resample=Image.Resampling.BICUBIC)
+              overlay=Image.new('L',img.size,0)
+              xy=[(15,20),(360,420),(710,720)][i%3]
+              overlay.paste(mark,xy)
+              alpha=np.asarray(overlay,dtype=np.float32)/255*[.90,.45,.25][i%3]
+              ink=alpha>0
+              truth=np.array(overlay.filter(ImageFilter.MaxFilter(7)))>0
+              inp=np.rint(src*(1-alpha[:,:,None])+255*alpha[:,:,None]).astype(np.uint8)
+              start=time.perf_counter()
+              known=repair(inp,truth)
+              known_s=time.perf_counter()-start
+              start=time.perf_counter()
+              obs,_=ocr(inp[:,:,::-1].copy(),use_cls=False)
+              found=np.zeros(truth.shape,np.uint8)
+              for polygon,label,score in obs or []:
+                  if re.sub(r'[^A-Z0-9]','',label.upper())=='TEST2026' and score>=.5:
+                      cv2.fillConvexPoly(found,np.rint(polygon).astype(np.int32),1)
+              found=cv2.dilate(found,np.ones((5,5),np.uint8))>0
+              det_s=time.perf_counter()-start
+              start=time.perf_counter()
+              auto=repair(inp,found)
+              auto_s=time.perf_counter()-start
+              def err(a):
+                  return round(float(np.abs(a.astype(float)-src)[ink].mean()),3)
+              row=dict(photo=name,known_seconds=round(known_s,3),detect_seconds=round(det_s,3),auto_repair_seconds=round(auto_s,3),detected=bool(found.any()),ink_recall=round(float((found&ink).sum()/ink.sum()),4),original_error=err(inp),known_error=err(known),auto_error=err(auto),unchanged_outside_selected=bool(np.array_equal(auto[~found],inp[~found])),peak_rss_mib=round(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss/1024,1))
+              rows.append(row)
+              print('LAMA_PHOTO_RESULT',json.dumps(row),flush=True)
+              for label,array in [('input',inp),('known-mask',known),('auto',auto),('original',src)]:
+                  Image.fromarray(array).save('photo-output/'+name+'-'+label+'.jpg',quality=95)
+          with open('photo-output/results.json','w') as f: json.dump(rows,f,indent=2)
+          print('LAMA_PHOTO_SUMMARY',json.dumps(dict(count=len(rows),detected=sum(x['detected'] for x in rows),mean_ink_recall=sum(x['ink_recall'] for x in rows)/len(rows),max_rss_mib=max(x['peak_rss_mib'] for x in rows))),flush=True)
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: lama-photo-validation
+          path: photo-output/
+          retention-days: 3
