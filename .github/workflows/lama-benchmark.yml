@@ -1,0 +1,63 @@
+name: LaMa isolated CPU benchmark
+on:
+  push:
+    branches: [lama-benchmark-20261127]
+    paths: ['.github/workflows/lama-benchmark.yml']
+permissions:
+  contents: read
+jobs:
+  benchmark:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install CPU inference dependencies
+        run: |
+          pip install --index-url https://download.pytorch.org/whl/cpu torch==2.5.1
+          pip install pillow numpy
+      - name: Download public LaMa weights
+        run: |
+          curl -fL --retry 2 --max-time 180 https://github.com/Sanster/models/releases/download/add_big_lama/big-lama.pt -o big-lama.pt
+          echo 'e3aa4aaa15225a33ec84f9f4bc47e500  big-lama.pt' | md5sum -c -
+      - name: Run synthetic image restoration benchmark
+        run: |
+          python - <<'PY'
+          import time, os, json
+          import numpy as np
+          from PIL import Image, ImageDraw, ImageFont, ImageFilter
+          import torch
+          torch.set_num_threads(min(4,os.cpu_count() or 1))
+          model=torch.jit.load('big-lama.pt',map_location='cpu').eval()
+          for size in (512,1024):
+              image=Image.new('RGB',(size,size),'#ded5c5')
+              d=ImageDraw.Draw(image)
+              d.rectangle((0,size*3//4,size,size),fill='#8d8172')
+              d.rounded_rectangle((size//4,size//4,size*3//4,size*4//5),radius=size//60,fill='#ae8152',outline='#67492d',width=3)
+              for i in range(2):
+                  y=size//3+i*size//5
+                  d.rectangle((size//4+10,y,size*3//4-10,y+size//6),outline='#67492d',width=3)
+                  d.rounded_rectangle((size*45//100,y+size//14,size*55//100,y+size//14+6),radius=3,fill='#302c29')
+              mask=Image.new('L',(size,size),0)
+              draw=ImageDraw.Draw(mask)
+              font=ImageFont.truetype('DejaVuSans.ttf',size//15)
+              for x,y in ((size//10,size//6),(size//3,size//2),(size//2,size*7//10)):
+                  draw.text((x,y),'TEST',font=font,fill=255)
+              source=np.array(image)
+              m=np.asarray(mask)>0
+              marked=source.copy()
+              marked[m]=255
+              region=np.asarray(mask.filter(ImageFilter.MaxFilter(7)))>0
+              im=torch.from_numpy(marked.copy()).permute(2,0,1).unsqueeze(0).float()/255
+              ma=torch.from_numpy(region.copy()).unsqueeze(0).unsqueeze(0).float()
+              times=[]
+              for n in range(3):
+                  start=time.perf_counter()
+                  with torch.inference_mode(): out=model(im,ma)
+                  times.append(round(time.perf_counter()-start,3))
+              restored=(out[0].permute(1,2,0).clamp(0,1).numpy()*255).astype('uint8')
+              restored=np.where(region[:,:,None],restored,marked)
+              mae=float(np.abs(restored.astype(float)-source)[region].mean())
+              print('LAMA_BENCHMARK',json.dumps(dict(size=size,seconds=times,masked_mae=mae,unchanged_outside=bool(np.array_equal(restored[~region],source[~region])))),flush=True)
+          PY
