@@ -55,7 +55,7 @@ jobs:
               return result
           os.makedirs('photo-output',exist_ok=True)
           rows=[]
-          for i,name in enumerate(['coffee','camera','coins','rocket','brick','grass','gravel','cat','horse']):
+          for i,name in enumerate(['coffee','camera','coins','rocket','brick','grass','gravel','cat','horse','coffee']):
               img=Image.fromarray(getattr(data,name)()).convert('RGB')
               img=img.resize((1024,1024),Image.Resampling.LANCZOS)
               src=np.array(img)
@@ -68,7 +68,9 @@ jobs:
               alpha=np.asarray(overlay,dtype=np.float32)/255*[.90,.45,.25][i%3]
               ink=alpha>0
               truth=np.array(overlay.filter(ImageFilter.MaxFilter(7)))>0
-              inp=np.rint(src*(1-alpha[:,:,None])+255*alpha[:,:,None]).astype(np.uint8)
+              ink_color=0 if float(src[ink].mean())>210 else 255
+              if i==9: alpha[:]=0; ink[:]=False; truth[:]=False
+              inp=np.rint(src*(1-alpha[:,:,None])+ink_color*alpha[:,:,None]).astype(np.uint8)
               start=time.perf_counter()
               known=repair(inp,truth)
               known_s=time.perf_counter()-start
@@ -84,14 +86,14 @@ jobs:
               auto=repair(inp,found)
               auto_s=time.perf_counter()-start
               def err(a):
-                  return round(float(np.abs(a.astype(float)-src)[ink].mean()),3)
-              row=dict(photo=name,known_seconds=round(known_s,3),detect_seconds=round(det_s,3),auto_repair_seconds=round(auto_s,3),detected=bool(found.any()),ink_recall=round(float((found&ink).sum()/ink.sum()),4),original_error=err(inp),known_error=err(known),auto_error=err(auto),unchanged_outside_selected=bool(np.array_equal(auto[~found],inp[~found])),peak_rss_mib=round(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss/1024,1))
+                  return round(float(np.abs(a.astype(float)-src)[ink].mean()),3) if ink.any() else 0.0
+              row=dict(photo=name if i<9 else 'unmarked-control',known_seconds=round(known_s,3),detect_seconds=round(det_s,3),auto_repair_seconds=round(auto_s,3),detected=bool(found.any()),ink_recall=round(float((found&ink).sum()/ink.sum()),4) if ink.any() else None,original_error=err(inp),known_error=err(known),auto_error=err(auto),unchanged_outside_selected=bool(np.array_equal(auto[~found],inp[~found])),peak_rss_mib=round(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss/1024,1))
               rows.append(row)
               print('LAMA_PHOTO_RESULT',json.dumps(row),flush=True)
               for label,array in [('input',inp),('known-mask',known),('auto',auto),('original',src)]:
-                  Image.fromarray(array).save('photo-output/'+name+'-'+label+'.jpg',quality=95)
+                  Image.fromarray(array).save('photo-output/'+row['photo']+'-'+label+'.jpg',quality=95)
           with open('photo-output/results.json','w') as f: json.dump(rows,f,indent=2)
-          print('LAMA_PHOTO_SUMMARY',json.dumps(dict(count=len(rows),detected=sum(x['detected'] for x in rows),mean_ink_recall=sum(x['ink_recall'] for x in rows)/len(rows),max_rss_mib=max(x['peak_rss_mib'] for x in rows))),flush=True)
+          print('LAMA_PHOTO_SUMMARY',json.dumps(dict(count=len(rows)-1,detected=sum(x['detected'] for x in rows[:-1]),mean_ink_recall=sum(x['ink_recall'] for x in rows[:-1])/(len(rows)-1),unmarked_control_unchanged=not rows[-1]['detected'] and rows[-1]['unchanged_outside_selected'],max_rss_mib=max(x['peak_rss_mib'] for x in rows))),flush=True)
           PY
       - uses: actions/upload-artifact@v4
         if: always()
