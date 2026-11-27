@@ -1,7 +1,7 @@
 name: LaMa isolated CPU benchmark
 on:
-  push:
-    branches: [lama-benchmark-20261127]
+  pull_request:
+    branches: [lama-benchmark-base-20261127]
     paths: ['.github/workflows/lama-benchmark.yml']
 permissions:
   contents: read
